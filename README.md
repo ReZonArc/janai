@@ -64,7 +64,20 @@ Download from [jan.ai](https://jan.ai/) or [GitHub Releases](https://github.com/
 - **Custom Assistants**: Create specialized AI assistants for your tasks
 - **OpenAI-Compatible API**: Local server at `localhost:1337` for other applications
 - **Model Context Protocol**: MCP integration for enhanced capabilities
+- **Noi Browser Integration**: Access Noi browser features as a toolbox for models, including batch AI interactions and prompts management
 - **Privacy First**: Everything runs locally when you want it to
+
+## Noi Browser Integration
+
+Jan now includes tight integration with Noi Browser, an AI-enhanced customizable browser. This allows you to:
+
+- Use Noi as a toolbox for models alongside the chat window
+- Access curated AI websites and add custom URLs
+- Manage prompts with synchronization and batch tagging
+- Send batch messages to multiple AI chats simultaneously
+- Utilize themes, cache mode, and cookie data isolation
+
+For more details on Noi features, see [janoi/NOI-README.md](janoi/NOI-README.md).
 
 ## Build from Source
 

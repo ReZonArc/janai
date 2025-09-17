@@ -55,6 +55,12 @@ const mainMenus = [
     isEnabled: PlatformFeatures[PlatformFeature.MODEL_HUB],
   },
   {
+    title: 'Noi Browser',
+    icon: IconSearch, // or another icon
+    route: '/noi-browser',
+    isEnabled: true,
+  },
+  {
     title: 'common:settings',
     icon: IconSettingsFilled,
     route: route.settings.general,
