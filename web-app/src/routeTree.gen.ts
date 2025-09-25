@@ -12,6 +12,7 @@
 
 import { Route as rootRoute } from './routes/__root'
 import { Route as SystemMonitorImport } from './routes/system-monitor'
+import { Route as NoiBrowserImport } from './routes/noi-browser'
 import { Route as LogsImport } from './routes/logs'
 import { Route as AssistantImport } from './routes/assistant'
 import { Route as IndexImport } from './routes/index'
@@ -39,6 +40,12 @@ import { Route as AuthGoogleCallbackImport } from './routes/auth.google.callback
 const SystemMonitorRoute = SystemMonitorImport.update({
   id: '/system-monitor',
   path: '/system-monitor',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const NoiBrowserRoute = NoiBrowserImport.update({
+  id: '/noi-browser',
+  path: '/noi-browser',
   getParentRoute: () => rootRoute,
 } as any)
 
@@ -194,6 +201,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LogsImport
       parentRoute: typeof rootRoute
     }
+    '/noi-browser': {
+      id: '/noi-browser'
+      path: '/noi-browser'
+      fullPath: '/noi-browser'
+      preLoaderRoute: typeof NoiBrowserImport
+      parentRoute: typeof rootRoute
+    }
     '/system-monitor': {
       id: '/system-monitor'
       path: '/system-monitor'
@@ -336,6 +350,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/assistant': typeof AssistantRoute
   '/logs': typeof LogsRoute
+  '/noi-browser': typeof NoiBrowserRoute
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
@@ -361,6 +376,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/assistant': typeof AssistantRoute
   '/logs': typeof LogsRoute
+  '/noi-browser': typeof NoiBrowserRoute
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
@@ -383,10 +399,11 @@ export interface FileRoutesByTo {
 }
 
 export interface FileRoutesById {
-  '__root__': typeof rootRoute
+  __root__: typeof rootRoute
   '/': typeof IndexRoute
   '/assistant': typeof AssistantRoute
   '/logs': typeof LogsRoute
+  '/noi-browser': typeof NoiBrowserRoute
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
@@ -414,6 +431,7 @@ export interface FileRouteTypes {
     | '/'
     | '/assistant'
     | '/logs'
+    | '/noi-browser'
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
@@ -438,6 +456,7 @@ export interface FileRouteTypes {
     | '/'
     | '/assistant'
     | '/logs'
+    | '/noi-browser'
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
@@ -462,6 +481,7 @@ export interface FileRouteTypes {
     | '/'
     | '/assistant'
     | '/logs'
+    | '/noi-browser'
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
@@ -488,6 +508,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AssistantRoute: typeof AssistantRoute
   LogsRoute: typeof LogsRoute
+  NoiBrowserRoute: typeof NoiBrowserRoute
   SystemMonitorRoute: typeof SystemMonitorRoute
   HubModelIdRoute: typeof HubModelIdRoute
   LocalApiServerLogsRoute: typeof LocalApiServerLogsRoute
@@ -513,6 +534,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AssistantRoute: AssistantRoute,
   LogsRoute: LogsRoute,
+  NoiBrowserRoute: NoiBrowserRoute,
   SystemMonitorRoute: SystemMonitorRoute,
   HubModelIdRoute: HubModelIdRoute,
   LocalApiServerLogsRoute: LocalApiServerLogsRoute,
@@ -547,6 +569,7 @@ export const routeTree = rootRoute
         "/",
         "/assistant",
         "/logs",
+        "/noi-browser",
         "/system-monitor",
         "/hub/$modelId",
         "/local-api-server/logs",
@@ -576,6 +599,9 @@ export const routeTree = rootRoute
     },
     "/logs": {
       "filePath": "logs.tsx"
+    },
+    "/noi-browser": {
+      "filePath": "noi-browser.tsx"
     },
     "/system-monitor": {
       "filePath": "system-monitor.tsx"
