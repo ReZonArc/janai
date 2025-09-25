@@ -12,7 +12,9 @@
 
 import { Route as rootRoute } from './routes/__root'
 import { Route as SystemMonitorImport } from './routes/system-monitor'
+import { Route as NoiBrowserImport } from './routes/noi-browser'
 import { Route as LogsImport } from './routes/logs'
+import { Route as IdeImport } from './routes/ide'
 import { Route as AssistantImport } from './routes/assistant'
 import { Route as IndexImport } from './routes/index'
 import { Route as ProjectIndexImport } from './routes/project/index'
@@ -42,9 +44,21 @@ const SystemMonitorRoute = SystemMonitorImport.update({
   getParentRoute: () => rootRoute,
 } as any)
 
+const NoiBrowserRoute = NoiBrowserImport.update({
+  id: '/noi-browser',
+  path: '/noi-browser',
+  getParentRoute: () => rootRoute,
+} as any)
+
 const LogsRoute = LogsImport.update({
   id: '/logs',
   path: '/logs',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const IdeRoute = IdeImport.update({
+  id: '/ide',
+  path: '/ide',
   getParentRoute: () => rootRoute,
 } as any)
 
@@ -187,11 +201,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AssistantImport
       parentRoute: typeof rootRoute
     }
+    '/ide': {
+      id: '/ide'
+      path: '/ide'
+      fullPath: '/ide'
+      preLoaderRoute: typeof IdeImport
+      parentRoute: typeof rootRoute
+    }
     '/logs': {
       id: '/logs'
       path: '/logs'
       fullPath: '/logs'
       preLoaderRoute: typeof LogsImport
+      parentRoute: typeof rootRoute
+    }
+    '/noi-browser': {
+      id: '/noi-browser'
+      path: '/noi-browser'
+      fullPath: '/noi-browser'
+      preLoaderRoute: typeof NoiBrowserImport
       parentRoute: typeof rootRoute
     }
     '/system-monitor': {
@@ -335,7 +363,9 @@ declare module '@tanstack/react-router' {
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/assistant': typeof AssistantRoute
+  '/ide': typeof IdeRoute
   '/logs': typeof LogsRoute
+  '/noi-browser': typeof NoiBrowserRoute
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
@@ -360,7 +390,9 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/assistant': typeof AssistantRoute
+  '/ide': typeof IdeRoute
   '/logs': typeof LogsRoute
+  '/noi-browser': typeof NoiBrowserRoute
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
@@ -383,10 +415,12 @@ export interface FileRoutesByTo {
 }
 
 export interface FileRoutesById {
-  '__root__': typeof rootRoute
+  __root__: typeof rootRoute
   '/': typeof IndexRoute
   '/assistant': typeof AssistantRoute
+  '/ide': typeof IdeRoute
   '/logs': typeof LogsRoute
+  '/noi-browser': typeof NoiBrowserRoute
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
@@ -413,7 +447,9 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/assistant'
+    | '/ide'
     | '/logs'
+    | '/noi-browser'
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
@@ -437,7 +473,9 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/assistant'
+    | '/ide'
     | '/logs'
+    | '/noi-browser'
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
@@ -461,7 +499,9 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/assistant'
+    | '/ide'
     | '/logs'
+    | '/noi-browser'
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
@@ -487,7 +527,9 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AssistantRoute: typeof AssistantRoute
+  IdeRoute: typeof IdeRoute
   LogsRoute: typeof LogsRoute
+  NoiBrowserRoute: typeof NoiBrowserRoute
   SystemMonitorRoute: typeof SystemMonitorRoute
   HubModelIdRoute: typeof HubModelIdRoute
   LocalApiServerLogsRoute: typeof LocalApiServerLogsRoute
@@ -512,7 +554,9 @@ export interface RootRouteChildren {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AssistantRoute: AssistantRoute,
+  IdeRoute: IdeRoute,
   LogsRoute: LogsRoute,
+  NoiBrowserRoute: NoiBrowserRoute,
   SystemMonitorRoute: SystemMonitorRoute,
   HubModelIdRoute: HubModelIdRoute,
   LocalApiServerLogsRoute: LocalApiServerLogsRoute,
@@ -546,7 +590,9 @@ export const routeTree = rootRoute
       "children": [
         "/",
         "/assistant",
+        "/ide",
         "/logs",
+        "/noi-browser",
         "/system-monitor",
         "/hub/$modelId",
         "/local-api-server/logs",
@@ -574,8 +620,14 @@ export const routeTree = rootRoute
     "/assistant": {
       "filePath": "assistant.tsx"
     },
+    "/ide": {
+      "filePath": "ide.tsx"
+    },
     "/logs": {
       "filePath": "logs.tsx"
+    },
+    "/noi-browser": {
+      "filePath": "noi-browser.tsx"
     },
     "/system-monitor": {
       "filePath": "system-monitor.tsx"
