@@ -16,6 +16,7 @@ import {
   IconFolder,
   IconPencil,
   IconTrash,
+  IconCodeCircle2,
 } from '@tabler/icons-react'
 import { route } from '@/constants/routes'
 import ThreadList from './ThreadList'
@@ -74,6 +75,12 @@ const mainMenus = [
     title: 'Noi Browser',
     icon: IconSearch, // or another icon
     route: '/noi-browser',
+    isEnabled: true,
+  },
+  {
+    title: 'IDE',
+    icon: IconCodeCircle2,
+    route: '/ide',
     isEnabled: true,
   },
   {
