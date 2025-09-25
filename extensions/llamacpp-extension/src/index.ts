@@ -21,6 +21,7 @@ import {
   events,
   AppEvent,
   DownloadEvent,
+  chatCompletionRequestMessage,
 } from '@janhq/core'
 
 import { error, info, warn } from '@tauri-apps/plugin-log'
@@ -37,10 +38,16 @@ import { invoke } from '@tauri-apps/api/core'
 import { getProxyConfig } from './util'
 import { basename } from '@tauri-apps/api/path'
 import {
-  GgufMetadata,
   readGgufMetadata,
+  estimateKVCacheSize,
+  getModelSize,
+  isModelSupported,
+  planModelLoadInternal,
 } from '@janhq/tauri-plugin-llamacpp-api'
 import { getSystemUsage, getSystemInfo } from '@janhq/tauri-plugin-hardware-api'
+
+// Error message constant - matches web-app/src/utils/error.ts
+const OUT_OF_CONTEXT_SIZE = 'the request exceeds the available context size.'
 
 type LlamacppConfig = {
   version_backend: string
@@ -81,6 +88,7 @@ type ModelPlan = {
   maxContextLength: number
   noOffloadKVCache: boolean
   offloadMmproj?: boolean
+  batchSize: number
   mode: 'GPU' | 'Hybrid' | 'CPU' | 'Unsupported'
 }
 
@@ -175,7 +183,7 @@ export default class llamacpp_extension extends AIEngine {
   provider: string = 'llamacpp'
   autoUnload: boolean = true
   llamacpp_env: string = ''
-  memoryMode: string = 'high'
+  memoryMode: string = ''
   readonly providerId: string = 'llamacpp'
 
   private config: LlamacppConfig
@@ -207,7 +215,7 @@ export default class llamacpp_extension extends AIEngine {
 
     this.autoUnload = this.config.auto_unload
     this.llamacpp_env = this.config.llamacpp_env
-    this.memoryMode = this.config.memory_util
+    this.memoryMode = this.config.memory_util || 'high'
 
     // This sets the base directory where model files for this provider are stored.
     this.providerPath = await joinPath([
@@ -921,6 +929,30 @@ export default class llamacpp_extension extends AIEngine {
     return hash
   }
 
+  override async get(modelId: string): Promise<modelInfo | undefined> {
+    const modelPath = await joinPath([
+      await this.getProviderPath(),
+      'models',
+      modelId,
+    ])
+    const path = await joinPath([modelPath, 'model.yml'])
+
+    if (!(await fs.existsSync(path))) return undefined
+
+    const modelConfig = await invoke<ModelConfig>('read_yaml', {
+      path,
+    })
+
+    return {
+      id: modelId,
+      name: modelConfig.name ?? modelId,
+      quant_type: undefined, // TODO: parse quantization type from model.yml or model.gguf
+      providerId: this.provider,
+      port: 0, // port is not known until the model is loaded
+      sizeBytes: modelConfig.size_bytes ?? 0,
+    } as modelInfo
+  }
+
   // Implement the required LocalProvider interface methods
   override async list(): Promise<modelInfo[]> {
     const modelsDir = await joinPath([await this.getProviderPath(), 'models'])
@@ -1080,11 +1112,14 @@ export default class llamacpp_extension extends AIEngine {
    */
   async installBackend(path: string): Promise<void> {
     const platformName = IS_WINDOWS ? 'win' : 'linux'
-    const re = /^llama-(b\d+)-bin-(.+?)\.tar\.gz$/
+    const re = /^llama-(b\d+)-bin-(.+?)\.(?:tar\.gz|zip)$/
     const archiveName = await basename(path)
     logger.info(`Installing backend from path: ${path}`)
 
-    if (!(await fs.existsSync(path)) || !path.endsWith('tar.gz')) {
+    if (
+      !(await fs.existsSync(path)) ||
+      (!path.endsWith('tar.gz') && !path.endsWith('zip'))
+    ) {
       logger.error(`Invalid path or file ${path}`)
       throw new Error(`Invalid path or file ${path}`)
     }
@@ -1541,7 +1576,7 @@ export default class llamacpp_extension extends AIEngine {
       args.push('--main-gpu', String(cfg.main_gpu))
 
     // Boolean flags
-    if (!cfg.ctx_shift) args.push('--no-context-shift')
+    if (cfg.ctx_shift) args.push('--context-shift')
     if (Number(version.replace(/^b/, '')) >= 6325) {
       if (!cfg.flash_attn) args.push('--flash-attn', 'off') //default: auto = ON when supported
     } else {
@@ -1739,6 +1774,13 @@ export default class llamacpp_extension extends AIEngine {
           try {
             const data = JSON.parse(jsonStr)
             const chunk = data as chatCompletionChunk
+
+            // Check for out-of-context error conditions
+            if (chunk.choices?.[0]?.finish_reason === 'length') {
+              // finish_reason 'length' indicates context limit was hit
+              throw new Error(OUT_OF_CONTEXT_SIZE)
+            }
+
             yield chunk
           } catch (e) {
             logger.error('Error parsing JSON from stream or server error:', e)
@@ -1795,6 +1837,13 @@ export default class llamacpp_extension extends AIEngine {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${sessionInfo.api_key}`,
     }
+    // always enable prompt progress return if stream is true
+    // Requires llamacpp version > b6399
+    // Example json returned from server
+    // {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1758113912,"id":"chatcmpl-UwZwgxQKyJMo7WzMzXlsi90YTUK2BJro","model":"qwen","system_fingerprint":"b1-e4912fc","object":"chat.completion.chunk","prompt_progress":{"total":36,"cache":0,"processed":36,"time_ms":5706760300}}
+    // (chunk.prompt_progress?.processed / chunk.prompt_progress?.total) * 100
+    // chunk.prompt_progress?.cache is for past tokens already in kv cache
+    opts.return_progress = true
 
     const body = JSON.stringify(opts)
     if (opts.stream) {
@@ -1817,7 +1866,15 @@ export default class llamacpp_extension extends AIEngine {
       )
     }
 
-    return (await response.json()) as chatCompletion
+    const completionResponse = (await response.json()) as chatCompletion
+
+    // Check for out-of-context error conditions
+    if (completionResponse.choices?.[0]?.finish_reason === 'length') {
+      // finish_reason 'length' indicates context limit was hit
+      throw new Error(OUT_OF_CONTEXT_SIZE)
+    }
+
+    return completionResponse
   }
 
   override async delete(modelId: string): Promise<void> {
@@ -1956,11 +2013,6 @@ export default class llamacpp_extension extends AIEngine {
     return responseData as EmbeddingResponse
   }
 
-  // Optional method for direct client access
-  override getChatClient(sessionId: string): any {
-    throw new Error('method not implemented yet')
-  }
-
   /**
    * Check if a tool is supported by the model
    * Currently read from GGUF chat_template
@@ -2018,30 +2070,12 @@ export default class llamacpp_extension extends AIEngine {
       totalMemory,
     }
   }
-  private async getKVCachePerToken(
-    meta: Record<string, string>
-  ): Promise<number> {
-    const arch = meta['general.architecture']
-    const nLayer = Number(meta[`${arch}.block_count`])
-    const nHead = Number(meta[`${arch}.attention.head_count`])
-
-    // Get head dimensions
-    const nHeadKV = Number(meta[`${arch}.attention.head_count_kv`]) || nHead
-    const embeddingLen = Number(meta[`${arch}.embedding_length`])
-    const headDim = embeddingLen / nHead
-
-    // KV cache uses head_count_kv (for GQA models) or head_count
-    // Each token needs K and V, both are fp16 (2 bytes)
-    const bytesPerToken = nHeadKV * headDim * 2 * 2 * nLayer // K+V, fp16, all layers
-
-    return bytesPerToken
-  }
 
   private async getLayerSize(
     path: string,
     meta: Record<string, string>
   ): Promise<{ layerSize: number; totalLayers: number }> {
-    const modelSize = await this.getModelSize(path)
+    const modelSize = await getModelSize(path)
     const arch = meta['general.architecture']
     const totalLayers = Number(meta[`${arch}.block_count`]) + 2 // 1 for lm_head layer and 1 for embedding layer
     if (!totalLayers) throw new Error('Invalid metadata: block_count not found')
@@ -2057,383 +2091,27 @@ export default class llamacpp_extension extends AIEngine {
       /^\/\/[^/]+/.test(norm) // UNC path //server/share
     )
   }
-
+  /*
+    * if (!this.isAbsolutePath(path))
+      path = await joinPath([await getJanDataFolderPath(), path])
+    if (mmprojPath && !this.isAbsolutePath(mmprojPath))
+      mmprojPath = await joinPath([await getJanDataFolderPath(), path])
+  */
   async planModelLoad(
     path: string,
     mmprojPath?: string,
     requestedCtx?: number
   ): Promise<ModelPlan> {
-    if (!this.isAbsolutePath(path))
+    if (!this.isAbsolutePath(path)) {
       path = await joinPath([await getJanDataFolderPath(), path])
+    }
     if (mmprojPath && !this.isAbsolutePath(mmprojPath))
       mmprojPath = await joinPath([await getJanDataFolderPath(), path])
-    const modelSize = await this.getModelSize(path)
-    const memoryInfo = await this.getTotalSystemMemory()
-    const gguf = await readGgufMetadata(path)
-
-    // Get mmproj size if provided
-    let mmprojSize = 0
-    if (mmprojPath) {
-      mmprojSize = await this.getModelSize(mmprojPath)
-    }
-
-    const { layerSize, totalLayers } = await this.getLayerSize(
-      path,
-      gguf.metadata
-    )
-
-    // Fixed KV cache calculation
-    const kvCachePerToken = await this.getKVCachePerToken(gguf.metadata)
-
-    // Debug logging
-    logger.info(
-      `Model size: ${modelSize}, Layer size: ${layerSize}, Total layers: ${totalLayers}, KV cache per token: ${kvCachePerToken}`
-    )
-
-    // Validate critical values
-    if (!modelSize || modelSize <= 0) {
-      throw new Error(`Invalid model size: ${modelSize}`)
-    }
-    if (!kvCachePerToken || kvCachePerToken <= 0) {
-      throw new Error(`Invalid KV cache per token: ${kvCachePerToken}`)
-    }
-    if (!layerSize || layerSize <= 0) {
-      throw new Error(`Invalid layer size: ${layerSize}`)
-    }
-
-    // GPU overhead factor (20% reserved for GPU operations, alignment, etc.)
-    const GPU_OVERHEAD_FACTOR = 0.8
-
-    // VRAM budget with overhead consideration
-    const VRAM_RESERVE_GB = 0.5
-    const VRAM_RESERVE_BYTES = VRAM_RESERVE_GB * 1024 * 1024 * 1024
-    const usableVRAM = Math.max(
-      0,
-      (memoryInfo.totalVRAM - VRAM_RESERVE_BYTES) * GPU_OVERHEAD_FACTOR
-    )
-
-    // Get model's maximum context length
-    const arch = gguf.metadata['general.architecture']
-    const modelMaxContextLength =
-      Number(gguf.metadata[`${arch}.context_length`]) || 131072 // Default fallback
-
-    // Set minimum context length
-    const MIN_CONTEXT_LENGTH = 2048 // Reduced from 4096 for better compatibility
-
-    // System RAM budget
-    const memoryPercentages = { high: 0.7, medium: 0.5, low: 0.4 }
-
-    logger.info(
-      `Memory info - Total (VRAM + RAM): ${memoryInfo.totalMemory}, Total VRAM: ${memoryInfo.totalVRAM}, Mode: ${this.memoryMode}`
-    )
-
-    // Validate memory info
-    if (!memoryInfo.totalMemory || isNaN(memoryInfo.totalMemory)) {
-      throw new Error(`Invalid total memory: ${memoryInfo.totalMemory}`)
-    }
-    if (!memoryInfo.totalVRAM || isNaN(memoryInfo.totalVRAM)) {
-      throw new Error(`Invalid total VRAM: ${memoryInfo.totalVRAM}`)
-    }
-    if (!this.memoryMode || !(this.memoryMode in memoryPercentages)) {
-      throw new Error(
-        `Invalid memory mode: ${this.memoryMode}. Must be 'high', 'medium', or 'low'`
-      )
-    }
-
-    // Calculate actual system RAM
-    const actualSystemRAM = Math.max(
-      0,
-      memoryInfo.totalMemory - memoryInfo.totalVRAM
-    )
-    const usableSystemMemory =
-      actualSystemRAM * memoryPercentages[this.memoryMode]
-
-    logger.info(
-      `Actual System RAM: ${actualSystemRAM}, Usable VRAM: ${usableVRAM}, Usable System Memory: ${usableSystemMemory}`
-    )
-
-    // --- Priority 1: Allocate mmproj (if exists) ---
-    let offloadMmproj = false
-    let remainingVRAM = usableVRAM
-
-    if (mmprojSize > 0) {
-      if (mmprojSize <= remainingVRAM) {
-        offloadMmproj = true
-        remainingVRAM -= mmprojSize
-        logger.info(`MMProj allocated to VRAM: ${mmprojSize} bytes`)
-      } else {
-        logger.info(`MMProj will use CPU RAM: ${mmprojSize} bytes`)
-      }
-    }
-
-    // --- Priority 2: Calculate optimal layer/context balance ---
-    let gpuLayers = 0
-    let maxContextLength = MIN_CONTEXT_LENGTH
-    let noOffloadKVCache = false
-    let mode: ModelPlan['mode'] = 'Unsupported'
-
-    // Calculate how much VRAM we need for different context sizes
-    const contextSizes = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    const targetContext = requestedCtx || modelMaxContextLength
-
-    // Find the best balance of layers and context
-    let bestConfig = {
-      layers: 0,
-      context: MIN_CONTEXT_LENGTH,
-      vramUsed: 0,
-    }
-
-    for (const ctxSize of contextSizes) {
-      if (ctxSize > targetContext) break
-
-      const kvCacheSize = ctxSize * kvCachePerToken
-      const availableForLayers = remainingVRAM - kvCacheSize
-
-      if (availableForLayers <= 0) continue
-
-      const possibleLayers = Math.min(
-        Math.floor(availableForLayers / layerSize),
-        totalLayers
-      )
-
-      if (possibleLayers > 0) {
-        const totalVramNeeded = possibleLayers * layerSize + kvCacheSize
-
-        // Verify this fits with some margin
-        if (totalVramNeeded <= remainingVRAM * 0.95) {
-          bestConfig = {
-            layers: possibleLayers,
-            context: ctxSize,
-            vramUsed: totalVramNeeded,
-          }
-        }
-      }
-    }
-
-    // Apply the best configuration found
-    if (bestConfig.layers > 0) {
-      gpuLayers = bestConfig.layers
-      maxContextLength = bestConfig.context
-      noOffloadKVCache = false
-      mode = gpuLayers === totalLayers ? 'GPU' : 'Hybrid'
-
-      logger.info(
-        `Best GPU config: ${gpuLayers}/${totalLayers} layers, ${maxContextLength} context, ` +
-          `VRAM used: ${bestConfig.vramUsed}/${remainingVRAM} bytes`
-      )
-    } else {
-      // Fallback: Try minimal GPU layers with KV cache on CPU
-      gpuLayers = Math.min(
-        Math.floor((remainingVRAM * 0.9) / layerSize), // Use 90% for layers
-        totalLayers
-      )
-
-      if (gpuLayers > 0) {
-        // Calculate available system RAM for KV cache
-        const cpuLayers = totalLayers - gpuLayers
-        const modelCPUSize = cpuLayers * layerSize
-        const mmprojCPUSize = mmprojSize > 0 && !offloadMmproj ? mmprojSize : 0
-        const systemRAMUsed = modelCPUSize + mmprojCPUSize
-        const availableSystemRAMForKVCache = Math.max(
-          0,
-          usableSystemMemory - systemRAMUsed
-        )
-
-        // Calculate context that fits in system RAM
-        const systemRAMContext = Math.min(
-          Math.floor(availableSystemRAMForKVCache / kvCachePerToken),
-          targetContext
-        )
-
-        if (systemRAMContext >= MIN_CONTEXT_LENGTH) {
-          maxContextLength = systemRAMContext
-          noOffloadKVCache = true
-          mode = 'Hybrid'
-
-          logger.info(
-            `Hybrid mode: ${gpuLayers}/${totalLayers} layers on GPU, ` +
-              `${maxContextLength} context on CPU RAM`
-          )
-        } else {
-          // Can't fit reasonable context even with CPU RAM
-          // Reduce GPU layers further
-          gpuLayers = Math.floor(gpuLayers / 2)
-          maxContextLength = MIN_CONTEXT_LENGTH
-          noOffloadKVCache = true
-          mode = gpuLayers > 0 ? 'Hybrid' : 'CPU'
-        }
-      } else {
-        // Pure CPU mode
-        gpuLayers = 0
-        noOffloadKVCache = true
-
-        // Calculate context for pure CPU mode
-        const totalCPUMemoryNeeded = modelSize + (mmprojSize || 0)
-        const availableForKVCache = Math.max(
-          0,
-          usableSystemMemory - totalCPUMemoryNeeded
-        )
-
-        maxContextLength = Math.min(
-          Math.max(
-            MIN_CONTEXT_LENGTH,
-            Math.floor(availableForKVCache / kvCachePerToken)
-          ),
-          targetContext
-        )
-
-        mode = maxContextLength >= MIN_CONTEXT_LENGTH ? 'CPU' : 'Unsupported'
-      }
-    }
-
-    // Safety check: Verify total GPU memory usage
-    if (gpuLayers > 0 && !noOffloadKVCache) {
-      const estimatedGPUUsage =
-        gpuLayers * layerSize +
-        maxContextLength * kvCachePerToken +
-        (offloadMmproj ? mmprojSize : 0)
-
-      if (estimatedGPUUsage > memoryInfo.totalVRAM * 0.9) {
-        logger.warn(
-          `GPU memory usage (${estimatedGPUUsage}) exceeds safe limit. Adjusting...`
-        )
-
-        // Reduce context first
-        while (
-          maxContextLength > MIN_CONTEXT_LENGTH &&
-          estimatedGPUUsage > memoryInfo.totalVRAM * 0.9
-        ) {
-          maxContextLength = Math.floor(maxContextLength / 2)
-          const newEstimate =
-            gpuLayers * layerSize +
-            maxContextLength * kvCachePerToken +
-            (offloadMmproj ? mmprojSize : 0)
-          if (newEstimate <= memoryInfo.totalVRAM * 0.9) break
-        }
-
-        // If still too much, reduce layers
-        if (estimatedGPUUsage > memoryInfo.totalVRAM * 0.9) {
-          gpuLayers = Math.floor(gpuLayers * 0.7)
-          mode = gpuLayers > 0 ? 'Hybrid' : 'CPU'
-          noOffloadKVCache = true // Move KV cache to CPU
-        }
-      }
-    }
-
-    // Apply user-requested context limit if specified
-    if (requestedCtx && requestedCtx > 0) {
-      maxContextLength = Math.min(maxContextLength, requestedCtx)
-      logger.info(
-        `User requested context: ${requestedCtx}, final: ${maxContextLength}`
-      )
-    }
-
-    // Ensure we never exceed model's maximum context
-    maxContextLength = Math.min(maxContextLength, modelMaxContextLength)
-
-    // Final validation
-    if (gpuLayers <= 0 && maxContextLength < MIN_CONTEXT_LENGTH) {
-      mode = 'Unsupported'
-    }
-
-    // Ensure maxContextLength is valid
-    maxContextLength = isNaN(maxContextLength)
-      ? MIN_CONTEXT_LENGTH
-      : Math.max(MIN_CONTEXT_LENGTH, maxContextLength)
-
-    // Log final plan
-    const mmprojInfo = mmprojPath
-      ? `, mmprojSize=${(mmprojSize / (1024 * 1024)).toFixed(2)}MB, offloadMmproj=${offloadMmproj}`
-      : ''
-
-    logger.info(
-      `Final plan for ${path}: gpuLayers=${gpuLayers}/${totalLayers}, ` +
-        `maxContextLength=${maxContextLength}, noOffloadKVCache=${noOffloadKVCache}, ` +
-        `mode=${mode}${mmprojInfo}`
-    )
-
-    return {
-      gpuLayers,
-      maxContextLength,
-      noOffloadKVCache,
-      mode,
-      offloadMmproj,
-    }
-  }
-
-  /**
-   * estimate KVCache size from a given metadata
-   */
-  private async estimateKVCache(
-    meta: Record<string, string>,
-    ctx_size?: number
-  ): Promise<number> {
-    const arch = meta['general.architecture']
-    if (!arch) throw new Error('Invalid metadata: architecture not found')
-
-    const nLayer = Number(meta[`${arch}.block_count`])
-    if (!nLayer) throw new Error('Invalid metadata: block_count not found')
-
-    const nHead = Number(meta[`${arch}.attention.head_count`])
-    if (!nHead) throw new Error('Invalid metadata: head_count not found')
-
-    // Try to get key/value lengths first (more accurate)
-    const keyLen = Number(meta[`${arch}.attention.key_length`])
-    const valLen = Number(meta[`${arch}.attention.value_length`])
-
-    let headDim: number
-
-    if (keyLen && valLen) {
-      // Use explicit key/value lengths if available
-      logger.info(
-        `Using explicit key_length: ${keyLen}, value_length: ${valLen}`
-      )
-      headDim = keyLen + valLen
-    } else {
-      // Fall back to embedding_length estimation
-      const embeddingLen = Number(meta[`${arch}.embedding_length`])
-      if (!embeddingLen)
-        throw new Error('Invalid metadata: embedding_length not found')
-
-      // Standard transformer: head_dim = embedding_dim / num_heads
-      // For KV cache: we need both K and V, so 2 * head_dim per head
-      headDim = (embeddingLen / nHead) * 2
-      logger.info(
-        `Using embedding_length estimation: ${embeddingLen}, calculated head_dim: ${headDim}`
-      )
-    }
-
-    let ctxLen: number
-    if (!ctx_size) {
-      ctxLen = Number(meta[`${arch}.context_length`])
-    } else {
-      ctxLen = ctx_size
-    }
-
-    logger.info(`ctxLen: ${ctxLen}`)
-    logger.info(`nLayer: ${nLayer}`)
-    logger.info(`nHead: ${nHead}`)
-    logger.info(`headDim: ${headDim}`)
-
-    // Consider f16 by default
-    // Can be extended by checking cache-type-v and cache-type-k
-    // but we are checking overall compatibility with the default settings
-    // fp16 = 8 bits * 2 = 16
-    const bytesPerElement = 2
-
-    // Total KV cache size per token = nHead * headDim * bytesPerElement
-    const kvPerToken = nHead * headDim * bytesPerElement
-
-    return ctxLen * nLayer * kvPerToken
-  }
-
-  private async getModelSize(path: string): Promise<number> {
-    if (path.startsWith('https://')) {
-      const res = await fetch(path, { method: 'HEAD' })
-      const len = res.headers.get('content-length')
-      return len ? parseInt(len, 10) : 0
-    } else {
-      return (await fs.fileStat(path)).size
+    try {
+      const result = await planModelLoadInternal(path, this.memoryMode, mmprojPath, requestedCtx)
+      return result
+    } catch (e) {
+      throw new Error(String(e))
     }
   }
 
@@ -2447,52 +2125,11 @@ export default class llamacpp_extension extends AIEngine {
    */
   async isModelSupported(
     path: string,
-    ctx_size?: number
+    ctxSize?: number
   ): Promise<'RED' | 'YELLOW' | 'GREEN'> {
     try {
-      const modelSize = await this.getModelSize(path)
-      const memoryInfo = await this.getTotalSystemMemory()
-
-      logger.info(`modelSize: ${modelSize}`)
-
-      const gguf = await readGgufMetadata(path)
-      let kvCacheSize: number
-      if (ctx_size) {
-        kvCacheSize = await this.estimateKVCache(gguf.metadata, ctx_size)
-      } else {
-        kvCacheSize = await this.estimateKVCache(gguf.metadata)
-      }
-
-      // Total memory consumption = model weights + kvcache
-      const totalRequired = modelSize + kvCacheSize
-      logger.info(
-        `isModelSupported: Total memory requirement: ${totalRequired} for ${path}`
-      )
-
-      // Use 80% of total memory as the usable limit
-      const USABLE_MEMORY_PERCENTAGE = 0.8
-      const usableTotalMemory =
-        memoryInfo.totalMemory * USABLE_MEMORY_PERCENTAGE
-      const usableVRAM = memoryInfo.totalVRAM * USABLE_MEMORY_PERCENTAGE
-
-      // Check if model fits in total memory at all
-      if (modelSize > usableTotalMemory) {
-        return 'RED'
-      }
-
-      // Check if everything fits in VRAM (ideal case)
-      if (totalRequired <= usableVRAM) {
-        return 'GREEN'
-      }
-
-      // Check if model fits in VRAM but total requirement exceeds VRAM
-      // OR if total requirement fits in total memory but not in VRAM
-      if (modelSize <= usableVRAM || totalRequired <= usableTotalMemory) {
-        return 'YELLOW'
-      }
-
-      // If we get here, nothing fits properly
-      return 'RED'
+      const result = await isModelSupported(path, Number(ctxSize))
+      return result
     } catch (e) {
       throw new Error(String(e))
     }
@@ -2537,8 +2174,152 @@ export default class llamacpp_extension extends AIEngine {
       logger.error('Failed to validate GGUF file:', error)
       return {
         isValid: false,
-        error: `Failed to read model metadata: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        error: `Failed to read model metadata: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`,
       }
     }
+  }
+
+  async getTokensCount(opts: chatCompletionRequest): Promise<number> {
+    const sessionInfo = await this.findSessionByModel(opts.model)
+    if (!sessionInfo) {
+      throw new Error(`No active session found for model: ${opts.model}`)
+    }
+
+    // Check if the process is alive
+    const result = await invoke<boolean>('plugin:llamacpp|is_process_running', {
+      pid: sessionInfo.pid,
+    })
+    if (result) {
+      try {
+        await fetch(`http://localhost:${sessionInfo.port}/health`)
+      } catch (e) {
+        this.unload(sessionInfo.model_id)
+        throw new Error('Model appears to have crashed! Please reload!')
+      }
+    } else {
+      throw new Error('Model has crashed! Please reload!')
+    }
+
+    const baseUrl = `http://localhost:${sessionInfo.port}`
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${sessionInfo.api_key}`,
+    }
+
+    // Count image tokens first
+    let imageTokens = 0
+    const hasImages = opts.messages.some(
+      (msg) =>
+        Array.isArray(msg.content) &&
+        msg.content.some((content) => content.type === 'image_url')
+    )
+
+    if (hasImages) {
+      logger.info('Conversation has images')
+      try {
+        // Read mmproj metadata to get vision parameters
+        logger.info(`MMPROJ PATH: ${sessionInfo.mmproj_path}`)
+
+        const metadata = await readGgufMetadata(sessionInfo.mmproj_path)
+        logger.info(`mmproj metadata: ${JSON.stringify(metadata.metadata)}`)
+        imageTokens = await this.calculateImageTokens(
+          opts.messages,
+          metadata.metadata
+        )
+      } catch (error) {
+        logger.warn('Failed to calculate image tokens:', error)
+        // Fallback to a rough estimate if metadata reading fails
+        imageTokens = this.estimateImageTokensFallback(opts.messages)
+      }
+    }
+
+    // Calculate text tokens
+    const messages = JSON.stringify({ messages: opts.messages })
+
+    let parseResponse = await fetch(`${baseUrl}/apply-template`, {
+      method: 'POST',
+      headers: headers,
+      body: messages,
+    })
+
+    if (!parseResponse.ok) {
+      const errorData = await parseResponse.json().catch(() => null)
+      throw new Error(
+        `API request failed with status ${
+          parseResponse.status
+        }: ${JSON.stringify(errorData)}`
+      )
+    }
+
+    const parsedPrompt = await parseResponse.json()
+
+    const response = await fetch(`${baseUrl}/tokenize`, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify({
+        content: parsedPrompt.prompt,
+      }),
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null)
+      throw new Error(
+        `API request failed with status ${response.status}: ${JSON.stringify(
+          errorData
+        )}`
+      )
+    }
+
+    const dataTokens = await response.json()
+    const textTokens = dataTokens.tokens?.length || 0
+
+    return textTokens + imageTokens
+  }
+
+  private async calculateImageTokens(
+    messages: chatCompletionRequestMessage[],
+    metadata: Record<string, string>
+  ): Promise<number> {
+    // Extract vision parameters from metadata
+    const projectionDim =
+      Math.floor(Number(metadata['clip.vision.projection_dim']) / 10) || 256
+
+    // Count images in messages
+    let imageCount = 0
+    for (const message of messages) {
+      if (Array.isArray(message.content)) {
+        imageCount += message.content.filter(
+          (content) => content.type === 'image_url'
+        ).length
+      }
+    }
+
+    logger.info(
+      `Calculated ${projectionDim} tokens per image, ${imageCount} images total`
+    )
+    return projectionDim * imageCount - imageCount // remove the lingering <__image__> placeholder token
+  }
+
+  private estimateImageTokensFallback(
+    messages: chatCompletionRequestMessage[]
+  ): number {
+    // Fallback estimation if metadata reading fails
+    const estimatedTokensPerImage = 256 // Gemma's siglip
+
+    let imageCount = 0
+    for (const message of messages) {
+      if (Array.isArray(message.content)) {
+        imageCount += message.content.filter(
+          (content) => content.type === 'image_url'
+        ).length
+      }
+    }
+
+    logger.warn(
+      `Fallback estimation: ${estimatedTokensPerImage} tokens per image, ${imageCount} images total`
+    )
+    return imageCount * estimatedTokensPerImage - imageCount // remove the lingering <__image__> placeholder token
   }
 }
